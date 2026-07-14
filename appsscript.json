@@ -1,0 +1,213 @@
+// =================================================================
+// ⚙️ 設定エリア：あなたの情報に書き換えてください
+// =================================================================
+
+const CONFIG = {
+  // 【1】Googleドライブの「Buffer投稿用」フォルダのID
+  DRIVE_FOLDER_ID: '',
+
+  // 【2】1つ目のBufferアカウントの情報
+  ACCOUNT_1: {
+    TOKEN: '',
+    PROFILE_ID: 'XのID,BlueskyのID'
+  },
+
+  // 【3】2つ目のBufferアカウントの情報（使わない場合はそのままでOK）
+  ACCOUNT_2: {
+    TOKEN: 'ここにアカウント2 of パーソナルキーを入れる',
+    PROFILE_ID: 'TikTokのID, InstagramのID'
+  },
+
+  // 📝 Blogger（メール投稿）の設定
+  BLOGGER_EMAIL: ''
+};
+
+// =================================================================
+// 🚀 メイン処理：毎朝自動で実行されるプログラム
+// =================================================================
+
+function checkAndPostToBufferAndBlogger() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const data = sheet.getDataRange().getValues();
+  
+  const todayStr = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd");
+  
+  for (let i = 1; i < data.length; i++) {
+    if (!data[i][0]) continue;
+    
+    const rowDateStr = Utilities.formatDate(new Date(data[i][0]), "Asia/Tokyo", "yyyy/MM/dd");
+    const text = data[i][1];
+    const fileName = data[i][2];
+    const status = data[i][3];
+    
+    if (rowDateStr === todayStr && !status) {
+      
+      try {
+        let finalMediaUrl = null;
+        let fileBlob = null;
+        
+        const isVideo = checkIsVideo(fileName);
+        
+        if (fileName && fileName.trim() !== "") {
+          const folder = DriveApp.getFolderById(CONFIG.DRIVE_FOLDER_ID);
+          const files = folder.getFilesByName(fileName);
+          
+        if (files.hasNext()) {
+            const file = files.next();
+            file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+            
+            const fileId = file.getId(); // ファイルのIDを正しく取得
+            fileBlob = file.getBlob();   // Bloggerメール用のデータを取得
+            
+            // 💡 【ここを100%正しいURLに修正しました！】
+            if (isVideo) {
+              finalMediaUrl = "https://docs.google.com/uc?export=download&id=" + fileId;
+            } else {
+              finalMediaUrl = "https://lh3.googleusercontent.com/d/" + fileId;
+            }
+          } else {
+            sheet.getRange(i + 1, 4).setValue("エラー: ドライブにファイルが見つかりません");
+            continue;
+          }
+        } else {
+          sheet.getRange(i + 1, 4).setValue("エラー: 全てのポストに画像（動画）が必要です");
+          continue;
+        }
+        
+        // ① Bufferへの予約投稿処理
+        const res1 = postToEachChannels(CONFIG.ACCOUNT_1.TOKEN, CONFIG.ACCOUNT_1.PROFILE_ID, text, finalMediaUrl, isVideo);
+        Utilities.sleep(2000);
+        
+        let res2 = true;
+        if (CONFIG.ACCOUNT_2.TOKEN && !CONFIG.ACCOUNT_2.TOKEN.includes('ここに')) {
+          res2 = postToEachChannels(CONFIG.ACCOUNT_2.TOKEN, CONFIG.ACCOUNT_2.PROFILE_ID, text, finalMediaUrl, isVideo);
+        }
+        
+        // ② Bloggerへのメール自動送信処理（何も追加設定しなくて動く安全ルート）
+        let bloggerRes = false;
+        if (CONFIG.BLOGGER_EMAIL && !CONFIG.BLOGGER_EMAIL.includes('ここに')) {
+          bloggerRes = sendEmailToBlogger(CONFIG.BLOGGER_EMAIL, text, fileBlob);
+        }
+        
+        if (res1 && res2 && bloggerRes) {
+          sheet.getRange(i + 1, 4).setValue("完了（Buffer・Blogger）");
+          Logger.log(`行 ${i + 1}: すべての処理が正常に完了しました！`);
+        }
+        
+      } catch (error) {
+        sheet.getRange(i + 1, 4).setValue(`エラー: ${error.message}`);
+        Logger.log(`行 ${i + 1} でエラー発生: ${error.message}`);
+      }
+      break;
+    }
+  }
+}
+
+function sendEmailToBlogger(bloggerEmail, text, fileBlob) {
+  // ブログのタイトル（本文の最初の15文字）
+  const subject =  'ルブラン美夜子のレッツウェザー#';
+  
+  // 改行をブログ用のHTMLタグ（<br>）に変換
+  let htmlBody = text.replace(/\n/g, '<br>');
+  
+  // 💡 【設定】ブログに自動で付けたい「固定のタグ（ラベル）」を指定してください
+  // ※ 複数付けたい場合は 'イラスト, 更新情報' のようにカンマで区切ります
+  const fixedTag = 'leblanc, ルブラン美夜子,';
+  
+  const mailOptions = {
+    body: text,         // 通常テキスト本文
+    htmlBody: htmlBody  // HTML形式の本文
+  };
+  
+  // 💡 【ここを修正！】本文には一切含めず、メールの件名（Subject）の後ろに
+  // 「[タグ名]」または「#タグ名」の形式で合体させることで、本文への写り込みを100%防ぎます。
+  if (fixedTag && fixedTag.trim() !== '') {
+    // 例: 件名が「今日のイラスト... [イラスト, 更新情報]」という形になり、Bloggerが自動でタグ化します
+    mailOptions.subject = subject + ' [' + fixedTag + ']';
+  } else {
+    mailOptions.subject = subject;
+  }
+  
+  // 画像や動画があればメールに添付
+  if (fileBlob) {
+    mailOptions.attachments = [fileBlob];
+  }
+  
+  // メールを送信（件名はmailOptions側で上書き指定しているため、第2引数は空欄でOKです）
+  MailApp.sendEmail(bloggerEmail, mailOptions.subject, '', mailOptions);
+  
+  Logger.log(`Bloggerへのメール送信に成功しました。（タグ: ${fixedTag}）`);
+  return true;
+}
+
+function checkIsVideo(fileName) {
+  if (!fileName) return false;
+  const lowerName = fileName.toLowerCase();
+  return lowerName.endsWith('.mp4') || lowerName.endsWith('.mov') || lowerName.endsWith('.avi') || lowerName.endsWith('.webm') || lowerName.endsWith('.mkv');
+}
+
+function postToEachChannels(token, profileIdsString, text, mediaUrl, isVideo) {
+  const channelIds = profileIdsString.split(',').map(id => id.trim());
+  let allSuccess = true;
+  let errorMessages = [];
+  
+  for (const channelId of channelIds) {
+    if (!channelId) continue;
+    try {
+      sendCreatePostMutation(token, channelId, text, mediaUrl, isVideo);
+      Utilities.sleep(1000);
+    } catch (e) {
+      allSuccess = false;
+      errorMessages.push(`[${channelId}]: ${e.message}`);
+    }
+  }
+  if (!allSuccess) throw new Error(errorMessages.join(' | '));
+  return true;
+}
+
+// （以下、Buffer送信用の共通システム関数です）
+function sendCreatePostMutation(token, channelId, text, mediaUrl, isVideo) {
+  const url = 'https://api.buffer.com';
+  const graphqlQuery = `mutation CreateDirectPost($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id } } ... on MutationError { message } } }`;
+  
+  const assetData = {};
+  if (isVideo) {
+    assetData.video = { url: mediaUrl };
+  } else {
+    assetData.image = { url: mediaUrl };
+  }
+  
+  const payload = {
+    query: graphqlQuery,
+    variables: {
+      input: {
+        channelId: channelId,
+        text: text,
+        schedulingType: "automatic",
+        mode: "addToQueue",
+        saveToDraft: false,
+        assets: [assetData]
+      }
+    }
+  };
+  
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    headers: { 'Authorization': 'Bearer ' + token },
+    muteHttpExceptions: true
+  };
+  
+  const response = UrlFetchApp.fetch(url, options);
+  const responseCode = response.getResponseCode();
+  if (responseCode === 200) {
+    const json = JSON.parse(response.getContentText());
+    if (json.errors) throw new Error(json.errors[0].message);
+    const result = json.data.createPost;
+    if (result && result.message) throw new Error(result.message);
+    return true;
+  } else {
+    throw new Error(`HTTP ${responseCode} - ${response.getContentText()}`);
+  }
+}
